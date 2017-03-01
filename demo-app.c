@@ -25,12 +25,21 @@
  */
 
 #include <lttng/domain.h>
-#include <lttng/notification.h>
+#include <lttng/action/action.h>
+#include <lttng/action/notify.h>
+#include <lttng/condition/condition.h>
+#include <lttng/condition/buffer-usage.h>
+#include <lttng/condition/evaluation.h>
+#include <lttng/notification/channel.h>
+#include <lttng/notification/notification.h>
+#include <lttng/trigger/trigger.h>
+#include <lttng/endpoint.h>
 #include <stdio.h>
+#include <unistd.h>
 
 int handle_condition(
 		struct lttng_condition *condition,
-		struct lttng_condition_evaluation *condition_evaluation);
+		struct lttng_evaluation *condition_evaluation);
 
 int enable_all_events_in_channel(const char *session_name,
 		enum lttng_domain_type domain,
@@ -91,7 +100,8 @@ int main(int argc, char **argv)
 	 * "tracing" group or be root in order to interact with a root
 	 * session daemon.
 	 */
-	notification_channel = lttng_notification_channel_create();
+	notification_channel = lttng_notification_channel_create(
+			lttng_session_daemon_notification_endpoint);
 
 	/*
 	 * Triggers are a new concept introduced as part of this API.
@@ -119,11 +129,15 @@ int main(int argc, char **argv)
 	 */
 
 	/* Create Trigger A's condition. */
-	condition = lttng_condition_high_buffer_usage_threshold_create();
-	condition_status = lttng_condition_high_buffer_usage_threshold_set_threshold_percentage(
-			condition, 75);
-	condition_status = lttng_condition_high_buffer_usage_threshold_set_session_name(
+	condition = lttng_condition_buffer_usage_high_create();
+	condition_status = lttng_condition_buffer_usage_set_threshold_ratio(
+			condition, 0.75);
+	condition_status = lttng_condition_buffer_usage_set_session_name(
 			condition, "my_session");
+	condition_status = lttng_condition_buffer_usage_set_channel_name(
+			condition, "my_ust_channel");
+	condition_status = lttng_condition_buffer_usage_set_domain_type(
+			condition, LTTNG_DOMAIN_UST);
 
 	/*
 	 * Note that we have created a condition without specifying a channel,
@@ -136,10 +150,10 @@ int main(int argc, char **argv)
 	 * channels of the session, in every domain (user space, kernel,
 	 * python, etc.).
 	 *
-	 * The threshold can be expressed in bytes or as a percentage.
+	 * The threshold can be expressed in bytes or as a ratio.
 	 *
 	 * In our case, since we want to target all channels of the session, it
-	 * makes more sense to express our condition as a percentage since the
+	 * makes more sense to express our condition as a ratio since the
 	 * various channels could use buffer sizes that are very different.
 	 */
 
@@ -150,7 +164,7 @@ int main(int argc, char **argv)
 	 * In the scope of this feature, the only "action" we are interested in
 	 * is "emit notification".
 	 */
-	action = lttng_action_emit_notification_create();
+	action = lttng_action_notify_create();
 
 	/* A trigger associates a condition and an action. */
 	trigger = lttng_trigger_create(condition, action);
@@ -161,7 +175,7 @@ int main(int argc, char **argv)
 	 * LTTng will evaluate the condition specified and trigger the action
 	 * that was associated to it everytime it is met.
 	 */
-	lttng_register_trigger(trigger);
+	ret = lttng_register_trigger(trigger);
 
 	/*
 	 * Now that we have registered a trigger, a notification will be emitted
@@ -174,46 +188,41 @@ int main(int argc, char **argv)
 	lttng_notification_channel_subscribe(notification_channel, condition);
 
 	/* Clean-up */
-	lttng_condition_destroy(condition);
-	lttng_action_destroy(action);
 	lttng_trigger_destroy(trigger);
 
 
 	/* Create Trigger B, register it, and subscribe to its notifications. */
-	condition = lttng_condition_low_buffer_usage_threshold_create();
-	condition_status = lttng_condition_low_buffer_usage_threshold_set_threshold_percentage(
-			condition, 25);
-	action = lttng_action_emit_notification_create();
+	condition = lttng_condition_buffer_usage_low_create();
+	condition_status = lttng_condition_buffer_usage_set_threshold_ratio(
+			condition, 0.25);
+	condition_status = lttng_condition_buffer_usage_set_session_name(
+			condition, "my_session");
+	condition_status = lttng_condition_buffer_usage_set_channel_name(
+			condition, "my_ust_channel");
+	condition_status = lttng_condition_buffer_usage_set_domain_type(
+			condition, LTTNG_DOMAIN_UST);
+	action = lttng_action_notify_create();
 	trigger = lttng_trigger_create(condition, action);
 
 	lttng_register_trigger(trigger);
 	lttng_notification_channel_subscribe(notification_channel, condition);
 
 	/* Clean-up */
-	lttng_condition_destroy(condition);
-	lttng_action_destroy(action);
 	lttng_trigger_destroy(trigger);
 
 	for (;;) {
 		struct lttng_notification *notification;
 		enum lttng_notification_channel_status status;
-		struct lttng_condition_evaluation *evaluation;
+		struct lttng_evaluation *evaluation;
 
 		/* Receive the next notification. */
 		status = lttng_notification_channel_get_next_notification(
 				notification_channel,
-				&notification,
-				-1 /* no timeout */);
+				&notification);
 
 		switch (status) {
 		case LTTNG_NOTIFICATION_CHANNEL_STATUS_OK:
 			break;
-		case LTTNG_NOTIFICATION_CHANNEL_STATUS_TIMEOUT:
-			/*
-			 * Impossible in this case... but present for
-			 * completeness.
-			 */
-			continue;
 		case LTTNG_NOTIFICATION_CHANNEL_STATUS_NOTIFICATIONS_DROPPED:
 			/*
 			 * The session daemon can drop notifications if a
@@ -250,12 +259,9 @@ int main(int argc, char **argv)
 		 * at the moment the condition was met.
 		 */
 		condition = lttng_notification_get_condition(notification);
-		evaluation = lttng_notification_get_condition_evaluation(
-				notification);
+		evaluation = lttng_notification_get_evaluation(notification);
 
 		ret = handle_condition(condition, evaluation);
-		lttng_condition_destroy(condition);
-		lttng_condition_evaluation_destroy(evaluation);
 		lttng_notification_destroy(notification);
 		if (ret != 0) {
 			goto end;
@@ -268,7 +274,7 @@ end:
 
 int handle_condition(
 		struct lttng_condition *condition,
-		struct lttng_condition_evaluation *condition_evaluation)
+		struct lttng_evaluation *evaluation)
 {
 	int ret = 0;
 	enum lttng_condition_type condition_type;
@@ -276,18 +282,18 @@ int handle_condition(
 	condition_type = lttng_condition_get_type(condition);
 
 	switch (condition_type) {
-	case LTTNG_CONDITION_TYPE_HIGH_BUFFER_USAGE_THRESHOLD:
+	case LTTNG_CONDITION_TYPE_BUFFER_USAGE_HIGH:
 	{
 		const char *session_name = NULL;
 		const char *channel_name = NULL;
 		enum lttng_domain_type domain = LTTNG_DOMAIN_NONE;
-		uint64_t buffer_usage;
+		double buffer_usage;
 
 		/*
 		 * Trigger A, which we defined earlier, has been triggered.
 		 *
 		 * We can deduce that the condition evaluation type is
-		 * lttng_condition_evaluation_buffer_usage
+		 * lttng_evaluation_buffer_usage
 		 *
 		 * The condition evaluation object is used to determine the
 		 * session, domain, and channel of the buffer which triggered
@@ -296,20 +302,16 @@ int handle_condition(
 		 * We can also retrieve the buffer's usage at the time of the
 		 * evaluation of the notification.
 		 */
-		lttng_condition_evaluation_buffer_usage_get_buffer_usage_percentage(
-				condition_evaluation, &buffer_usage);
-
-		lttng_condition_evaluation_buffer_usage_get_session_name(
-				condition_evaluation, &session_name);
-
-		lttng_condition_evaluation_buffer_usage_get_domain_type(
-				condition_evaluation, &domain);
-
-		lttng_condition_evaluation_buffer_usage_get_channel_name(
-				condition_evaluation, &channel_name);
+		lttng_evaluation_buffer_usage_get_usage_ratio(
+				evaluation, &buffer_usage);
+		buffer_usage *= 100.0;
+		lttng_condition_buffer_usage_get_session_name(condition,
+				&session_name);
+		lttng_condition_buffer_usage_get_channel_name(condition,
+				&channel_name);
 
 		/* Log that this condition happened. */
-		printf("High threshold condition met in session \"%s\", channel \"%s\". The usage at the time of evaluation was of %ull\%",
+		printf("High threshold condition met in session \"%s\", channel \"%s\". The usage at the time of evaluation was of %f\%\n",
 				session_name, channel_name, buffer_usage);
 
 		/*
@@ -321,11 +323,12 @@ int handle_condition(
 				channel_name);
 		break;
 	}
-	case LTTNG_CONDITION_TYPE_LOW_BUFFER_USAGE_THRESHOLD:
+	case LTTNG_CONDITION_TYPE_BUFFER_USAGE_LOW:
 	{
 		const char *session_name = NULL;
 		const char *channel_name = NULL;
 		enum lttng_domain_type domain = LTTNG_DOMAIN_NONE;
+		double buffer_usage;
 
 		/*
 		 * Trigger B, which we defined earlier, has been triggered.
@@ -334,6 +337,17 @@ int handle_condition(
 		 * set, we can take an arbitrary action. In this case, we decide
 		 * to re-enable all events associated with the channel.
 		 */
+		lttng_evaluation_buffer_usage_get_usage_ratio(
+				evaluation, &buffer_usage);
+		buffer_usage *= 100.0;
+		lttng_condition_buffer_usage_get_session_name(condition,
+				&session_name);
+		lttng_condition_buffer_usage_get_channel_name(condition,
+				&channel_name);
+
+		/* Log that this condition happened. */
+		printf("Low threshold condition met in session \"%s\", channel \"%s\". The usage at the time of evaluation was of %f\%\n",
+				session_name, channel_name, buffer_usage);
 
 		/*
 		 * Retrieve info from condition and condition evaluation
