@@ -38,8 +38,8 @@
 #include <unistd.h>
 
 int handle_condition(
-		struct lttng_condition *condition,
-		struct lttng_evaluation *condition_evaluation);
+		const struct lttng_condition *condition,
+		const struct lttng_evaluation *condition_evaluation);
 
 int enable_all_events_in_channel(const char *session_name,
 		enum lttng_domain_type domain,
@@ -61,6 +61,7 @@ int disable_all_events_in_channel(const char *session_name,
 int main(int argc, char **argv)
 {
 	int ret = 0;
+	int notifs_handled = 0;
 	enum lttng_condition_status condition_status;
 	struct lttng_notification_channel *notification_channel;
 	struct lttng_condition *condition;
@@ -213,12 +214,14 @@ int main(int argc, char **argv)
 	for (;;) {
 		struct lttng_notification *notification;
 		enum lttng_notification_channel_status status;
-		struct lttng_evaluation *evaluation;
+		const struct lttng_evaluation *notification_evaluation;
+		const struct lttng_condition *notification_condition;
 
 		/* Receive the next notification. */
 		status = lttng_notification_channel_get_next_notification(
 				notification_channel,
 				&notification);
+		notifs_handled++;
 
 		switch (status) {
 		case LTTNG_NOTIFICATION_CHANNEL_STATUS_OK:
@@ -258,10 +261,13 @@ int main(int argc, char **argv)
 		 * The condition evaluation provides the buffer usage value
 		 * at the moment the condition was met.
 		 */
-		condition = lttng_notification_get_condition(notification);
-		evaluation = lttng_notification_get_evaluation(notification);
+		notification_condition = lttng_notification_get_condition(
+				notification);
+		notification_evaluation = lttng_notification_get_evaluation(
+				notification);
 
-		ret = handle_condition(condition, evaluation);
+		ret = handle_condition(notification_condition,
+				notification_evaluation);
 		lttng_notification_destroy(notification);
 		if (ret != 0) {
 			goto end;
@@ -273,8 +279,8 @@ end:
 }
 
 int handle_condition(
-		struct lttng_condition *condition,
-		struct lttng_evaluation *evaluation)
+		const struct lttng_condition *condition,
+		const struct lttng_evaluation *evaluation)
 {
 	int ret = 0;
 	enum lttng_condition_type condition_type;
