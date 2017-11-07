@@ -36,6 +36,8 @@
 #include <lttng/endpoint.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <assert.h>
+#include <stdlib.h>
 
 int handle_condition(
 		const struct lttng_condition *condition,
@@ -47,6 +49,45 @@ int enable_all_events_in_channel(const char *session_name,
 int disable_all_events_in_channel(const char *session_name,
 		enum lttng_domain_type domain,
 		const char *channel_name);
+
+void register_and_subscribe_size_trigger(const char *session_name,
+		uint64_t size, struct lttng_notification_channel *channel)
+{
+	int ret;
+	enum lttng_condition_status condition_status;
+	enum lttng_notification_channel_status channel_status;
+	struct lttng_condition *condition;
+	struct lttng_action *action;
+	struct lttng_trigger *trigger;
+
+	action = lttng_action_notify_create();
+	assert(action);
+
+	condition = lttng_condition_session_consumed_size_create();
+	assert(condition);
+
+	condition_status = lttng_condition_session_consumed_size_set_threshold(
+		condition, size);
+	assert(condition_status == LTTNG_CONDITION_STATUS_OK);
+	condition_status = lttng_condition_session_consumed_size_set_session_name(
+		condition, session_name);
+	assert(condition_status == LTTNG_CONDITION_STATUS_OK);
+
+	trigger = lttng_trigger_create(condition, action);
+	assert(trigger);
+
+	ret = lttng_register_trigger(trigger);
+	assert(!ret);
+	lttng_trigger_destroy(trigger);
+	trigger = NULL;
+
+	lttng_action_destroy(action);
+	action = NULL;
+
+	channel_status = lttng_notification_channel_subscribe(channel,
+		condition);
+	assert(channel_status == LTTNG_NOTIFICATION_CHANNEL_STATUS_OK);
+}
 
 /*
  * This application demonstrates the intended use of the new LTTng notification
@@ -208,6 +249,9 @@ int main(int argc, char **argv)
 	lttng_register_trigger(trigger);
 	lttng_notification_channel_subscribe(notification_channel, condition);
 
+	register_and_subscribe_size_trigger("my_session", 512 * 1024 * 1024,
+			notification_channel);
+
 	/* Clean-up */
 	lttng_trigger_destroy(trigger);
 
@@ -363,6 +407,10 @@ int handle_condition(
 				channel_name);
 		break;
 	}
+	case LTTNG_CONDITION_TYPE_SESSION_CONSUMED_SIZE:
+		printf("Got a condition session consumed size notification!\n");
+		exit(0);
+		break;
 	default:
 		/* Unexpected condition type. */
 		ret = 1;
